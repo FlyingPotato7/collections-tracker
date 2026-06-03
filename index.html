@@ -51,19 +51,24 @@ function docRef(key){ return doc(db, 'months', key); }
 async function persist(){
   if(saving) return;
   saving = true;
+  localPending = true;
   try {
     await setDoc(docRef(currentKey), { payload: JSON.stringify(data) });
-  } catch(e){ console.error('Save failed', e); toast('⚠ Save failed'); }
+    setStatus('synced');
+  } catch(e){ console.error('Save failed', e); toast('⚠ Save failed'); localPending=false; }
   saving = false;
 }
+
+let localPending = false;
 
 function subscribeMonth(key){
   if(unsubscribe) unsubscribe();
   setStatus('syncing…');
   unsubscribe = onSnapshot(docRef(key), snap => {
+    // If we just saved locally, skip re-render to avoid disrupting active input
+    if(localPending){ localPending=false; setStatus('synced'); return; }
     if(snap.exists()){
       const d = JSON.parse(snap.data().payload);
-      // Ensure arrays match week count
       d.rows.forEach(r=>{
         while(r.budget.length  < d.weeks.length) r.budget.push(null);
         while(r.actuals.length < d.weeks.length) r.actuals.push(null);
