@@ -5,6 +5,323 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Collections Tracker ✦</title>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+
+<!-- Firebase SDKs -->
+<script type="module">
+import { initializeApp }                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey:            "AIzaSyAdwkpKi2i1a77Z-Hs091jdWCCSLMsvFZo",
+  authDomain:        "collections-tracker-faf1e.firebaseapp.com",
+  projectId:         "collections-tracker-faf1e",
+  storageBucket:     "collections-tracker-faf1e.firebasestorage.app",
+  messagingSenderId: "575484606462",
+  appId:             "1:575484606462:web:2f06160c7f3fb8e1f1f2af"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ── State ──────────────────────────────────────────────
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+let currentKey  = toKey(new Date());
+let showActuals = false;
+let unsubscribe = null;
+let saving      = false;
+
+function toKey(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function keyLabel(k){ const [y,m]=k.split('-'); return MONTHS[+m-1]+' '+y; }
+
+function defaultData(){
+  return {
+    weeks: ['W1','W2','W3','W4'],
+    rows:  [
+      {name:'Project 1', budget:[null,null,null,null], actuals:[null,null,null,null]},
+      {name:'Project 2', budget:[null,null,null,null], actuals:[null,null,null,null]},
+    ]
+  };
+}
+
+let data = defaultData();
+
+// ── Firestore helpers ──────────────────────────────────
+function docRef(key){ return doc(db, 'months', key); }
+
+async function persist(){
+  if(saving) return;
+  saving = true;
+  try {
+    await setDoc(docRef(currentKey), { payload: JSON.stringify(data) });
+  } catch(e){ console.error('Save failed', e); toast('⚠ Save failed'); }
+  saving = false;
+}
+
+function subscribeMonth(key){
+  if(unsubscribe) unsubscribe();
+  setStatus('syncing…');
+  unsubscribe = onSnapshot(docRef(key), snap => {
+    if(snap.exists()){
+      const d = JSON.parse(snap.data().payload);
+      // Ensure arrays match week count
+      d.rows.forEach(r=>{
+        while(r.budget.length  < d.weeks.length) r.budget.push(null);
+        while(r.actuals.length < d.weeks.length) r.actuals.push(null);
+      });
+      data = d;
+    } else {
+      data = defaultData();
+    }
+    renderAll();
+    setStatus('synced');
+  }, err => { console.error(err); setStatus('offline'); });
+}
+
+function setStatus(s){
+  const el = document.getElementById('syncStatus');
+  if(!el) return;
+  el.textContent = s === 'synced' ? '✦ synced' : s === 'syncing…' ? '↻ syncing…' : '⚠ offline';
+  el.style.color  = s === 'synced' ? 'var(--accent)' : s === 'syncing…' ? 'var(--muted)' : 'var(--red-tx)';
+}
+
+// ── Month nav ──────────────────────────────────────────
+document.getElementById('prevMonth').onclick = ()=>shiftMonth(-1);
+document.getElementById('nextMonth').onclick = ()=>shiftMonth(1);
+function shiftMonth(d){
+  const [y,m]=currentKey.split('-').map(Number);
+  const nd=new Date(y,m-1+d,1);
+  currentKey=toKey(nd);
+  document.getElementById('monthLabel').textContent=keyLabel(currentKey);
+  subscribeMonth(currentKey);
+}
+
+// ── Add / remove weeks ────────────────────────────────
+window.addWeek = function(){
+  const n = data.weeks.length + 1;
+  data.weeks.push('W'+n);
+  data.rows.forEach(r=>{ r.budget.push(null); r.actuals.push(null); });
+  persist(); renderAll(); toast('Week added');
+};
+window.deleteWeek = function(wi){
+  if(data.weeks.length <= 1){ toast('Need at least 1 week'); return; }
+  data.weeks.splice(wi,1);
+  data.rows.forEach(r=>{ r.budget.splice(wi,1); r.actuals.splice(wi,1); });
+  persist(); renderAll(); toast('Week removed');
+};
+
+// ── Add / remove rows ──────────────────────────────────
+window.addRow = function(){
+  const blank = Array(data.weeks.length).fill(null);
+  data.rows.push({name:'New project', budget:[...blank], actuals:[...blank]});
+  persist(); renderAll();
+};
+window.deleteRow = function(ri){
+  data.rows.splice(ri,1); persist(); renderAll();
+};
+
+// ── Render ─────────────────────────────────────────────
+function renderAll(){
+  document.getElementById('monthLabel').textContent = keyLabel(currentKey);
+  buildGroupRow();
+  buildWeekRow();
+  buildTfoot();
+  renderRows();
+  recalc();
+  applyVis();
+  if(window.innerWidth <= 768){
+    document.querySelectorAll('input').forEach(inp=>inp.setAttribute('readonly',true));
+    const hint = document.getElementById('footerHint');
+    if(hint) hint.textContent='scroll sideways to see all weeks · synced across devices';
+  }
+}
+
+function buildGroupRow(){
+  const gr = document.getElementById('groupRow');
+  gr.innerHTML = '';
+  const thProj = document.createElement('th');
+  thProj.className='th-project'; thProj.textContent='Total for Month';
+  gr.appendChild(thProj);
+  data.weeks.forEach((wk,wi)=>{
+    const th=document.createElement('th');
+    th.id='gth'+wi; th.colSpan=showActuals?3:1; th.textContent=wk;
+    gr.appendChild(th);
+    gr.appendChild(document.createElement('th'));
+  });
+  const thTot=document.createElement('th');
+  thTot.className='th-total'; thTot.textContent='Total';
+  gr.appendChild(thTot);
+  gr.appendChild(document.createElement('th'));
+}
+
+function buildWeekRow(){
+  const wr=document.getElementById('weekRow');
+  wr.innerHTML='';
+  const thFirst=document.createElement('th');
+  thFirst.style.cssText='text-align:left;padding-left:0';
+  wr.appendChild(thFirst);
+  data.weeks.forEach((_,wi)=>{
+    const thP=document.createElement('th');
+    thP.className='cell-r editable-hdr'; thP.textContent='Plan';
+    thP.onclick=openRenameModal; wr.appendChild(thP);
+    const thA=document.createElement('th');
+    thA.className='cell-r act-col'+(showActuals?' vis':''); thA.textContent='Actual';
+    wr.appendChild(thA);
+    const thV=document.createElement('th');
+    thV.className='cell-r act-col'+(showActuals?' vis':''); thV.textContent='Var';
+    wr.appendChild(thV);
+    const thD=document.createElement('th');
+    thD.className='wk-del-th';
+    thD.innerHTML=`<button class="wk-del-btn" onclick="deleteWeek(${wi})" title="remove week">−</button>`;
+    wr.appendChild(thD);
+  });
+  const thTot=document.createElement('th'); thTot.className='cell-r'; wr.appendChild(thTot);
+  const thDel=document.createElement('th'); thDel.style.width='28px'; wr.appendChild(thDel);
+}
+
+function buildTfoot(){
+  const row=document.getElementById('tfootRow');
+  row.innerHTML='';
+  const tdL=document.createElement('td');
+  tdL.textContent='Total'; tdL.style.cssText='text-align:left;padding-left:0';
+  row.appendChild(tdL);
+  data.weeks.forEach((_,wi)=>{
+    const tp=document.createElement('td'); tp.className='tot-val'; tp.id='totB'+wi; row.appendChild(tp);
+    const ta=document.createElement('td'); ta.className='tot-val act-col'+(showActuals?' vis':''); ta.id='totA'+wi; row.appendChild(ta);
+    const tv=document.createElement('td'); tv.className='act-col'+(showActuals?' vis':''); tv.id='totV'+wi; row.appendChild(tv);
+    row.appendChild(document.createElement('td'));
+  });
+  const tAll=document.createElement('td'); tAll.className='tot-val'; tAll.id='totAll'; row.appendChild(tAll);
+  row.appendChild(document.createElement('td'));
+}
+
+function renderRows(){
+  const tbody=document.getElementById('tbody');
+  tbody.innerHTML='';
+  data.rows.forEach((row,ri)=>{
+    const tr=document.createElement('tr');
+    let html=`<td><input class="proj-input" type="text" value="${esc(row.name)}" placeholder="project name"
+      oninput="data.rows[${ri}].name=this.value;persist()"/></td>`;
+    data.weeks.forEach((_,wi)=>{
+      const bv=row.budget[wi]??'';
+      const av=row.actuals[wi]??'';
+      html+=`<td class="cell-r"><input type="number" value="${bv}" placeholder="—"
+        oninput="data.rows[${ri}].budget[${wi}]=this.value===''?null:+this.value;recalc();persist()"/></td>`;
+      html+=`<td class="cell-r act-col${showActuals?' vis':''}">
+        <input type="number" value="${av}" placeholder="—"
+        oninput="data.rows[${ri}].actuals[${wi}]=this.value===''?null:+this.value;recalc();persist()"/></td>`;
+      html+=`<td class="cell-r act-col${showActuals?' vis':''}" id="vp${ri}_${wi}">${varPill(row.budget[wi],row.actuals[wi])}</td>`;
+      html+=`<td></td>`;
+    });
+    const rowTot=(row.budget||[]).reduce((s,v)=>s+(v||0),0);
+    html+=`<td class="tot-val" id="rtot${ri}">${rowTot>0?fmt(rowTot):'—'}</td>`;
+    html+=`<td><button class="del-btn" onclick="deleteRow(${ri})" title="remove">×</button></td>`;
+    tr.innerHTML=html; tbody.appendChild(tr);
+  });
+}
+
+function varPill(b,a){
+  const has=b!==null||a!==null;
+  if(!has) return `<span class="var-nil">—</span>`;
+  const diff=(a||0)-(b||0);
+  const cls=diff>0?'var-good':diff<0?'var-bad':'';
+  const sign=diff>0?'+':'';
+  return cls?`<span class="var-pill ${cls}">${sign}${Number(diff).toLocaleString('en-IN')}</span>`
+            :`<span class="var-nil">—</span>`;
+}
+
+function fmt(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return Number(n).toLocaleString('en-IN'); }
+
+function recalc(){
+  let grandB=0;
+  data.weeks.forEach((_,wi)=>{
+    let sumB=0,sumA=0;
+    data.rows.forEach((row,ri)=>{
+      sumB+=row.budget[wi]||0; sumA+=row.actuals[wi]||0;
+      const cell=document.getElementById('vp'+ri+'_'+wi);
+      if(cell) cell.innerHTML=varPill(row.budget[wi],row.actuals[wi]);
+      const rt=document.getElementById('rtot'+ri);
+      if(rt){ const t=(row.budget||[]).reduce((s,v)=>s+(v||0),0); rt.textContent=t>0?fmt(t):'—'; }
+    });
+    const bEl=document.getElementById('totB'+wi);
+    const aEl=document.getElementById('totA'+wi);
+    const vEl=document.getElementById('totV'+wi);
+    if(bEl) bEl.textContent=sumB>0?fmt(sumB):'—';
+    if(aEl) aEl.textContent=sumA>0?fmt(sumA):'—';
+    if(vEl) vEl.innerHTML=(sumB>0||sumA>0)?varPill(sumB,sumA):'';
+    grandB+=sumB;
+  });
+  const allEl=document.getElementById('totAll');
+  if(allEl) allEl.textContent=grandB>0?fmt(grandB):'—';
+}
+
+function applyVis(){
+  document.querySelectorAll('.act-col').forEach(el=>el.classList.toggle('vis',showActuals));
+  data.weeks.forEach((_,wi)=>{ const g=document.getElementById('gth'+wi); if(g) g.colSpan=showActuals?3:1; });
+}
+
+window.toggleActuals=function(){
+  showActuals=!showActuals;
+  document.getElementById('toggleBtn').textContent=showActuals?'hide actuals & variance':'show actuals & variance';
+  applyVis();
+};
+
+// ── Rename modal ───────────────────────────────────────
+window.openRenameModal=function(){
+  const wrap=document.getElementById('renameInputs'); wrap.innerHTML='';
+  data.weeks.forEach((wk,i)=>{
+    wrap.innerHTML+=`<label>Week ${i+1}</label>
+      <div class="modal-row"><input class="modal-input" id="wki${i}" value="${esc(wk)}" placeholder="W${i+1}"/></div>`;
+  });
+  document.getElementById('renameModal').classList.add('open');
+};
+window.closeRenameModal=function(){ document.getElementById('renameModal').classList.remove('open'); };
+window.saveRenames=function(){
+  data.weeks=data.weeks.map((_,i)=>{ const v=document.getElementById('wki'+i); return v?v.value.trim()||'W'+(i+1):'W'+(i+1); });
+  persist(); closeRenameModal(); renderAll(); toast('Weeks renamed');
+};
+
+// ── Export CSV ─────────────────────────────────────────
+window.exportCSV=function(){
+  let csv='Project';
+  data.weeks.forEach(w=>{ csv+=`,Plan ${w},Actual ${w},Variance ${w}`; });
+  csv+=',Total\n';
+  data.rows.forEach(row=>{
+    csv+=`"${row.name}"`;
+    data.weeks.forEach((_,i)=>{
+      const b=row.budget[i]??'',a=row.actuals[i]??'';
+      const diff=(row.actuals[i]||0)-(row.budget[i]||0);
+      csv+=`,${b},${a},${(b!==''||a!=='')?diff:''}`;
+    });
+    csv+=','+(row.budget.reduce((s,v)=>s+(v||0),0)||'')+'\n';
+  });
+  const blob=new Blob([csv],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url;
+  a.download=`collections_${currentKey}.csv`; a.click();
+  URL.revokeObjectURL(url); toast('CSV exported');
+};
+
+// ── Toast ──────────────────────────────────────────────
+window.toast=function(msg){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),2200);
+};
+
+function esc(s){ return (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+// ── Make data/persist accessible globally for inline handlers ──
+window.data    = data;
+window.persist = persist;
+window.recalc  = recalc;
+
+// Proxy so inline oninput handlers always reference latest data
+Object.defineProperty(window,'data',{ get:()=>data, set:(v)=>{ data=v; } });
+
+// ── Boot ───────────────────────────────────────────────
+subscribeMonth(currentKey);
+</script>
+
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -24,172 +341,91 @@
     --red-tx:   #8c2a2a;
     --radius:   10px;
   }
-  body {
-    background: var(--bg); color: var(--text);
-    font-family: 'DM Sans', sans-serif; font-size: 14px;
-    min-height: 100vh; padding: 2.5rem 2rem 4rem;
-  }
-  .app-title {
-    font-family: 'EB Garamond', serif; font-size: 26px;
-    font-style: italic; font-weight: 400; color: var(--text);
-    display: flex; align-items: baseline; gap: 10px; margin-bottom: 3px;
-  }
-  .star { color: var(--accent); font-size: 14px; }
-  .app-sub { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; margin-bottom: 2rem; }
+  body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; min-height:100vh; padding:2.5rem 2rem 4rem; }
+  .app-header { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:3px; flex-wrap:wrap; gap:8px; }
+  .app-title { font-family:'EB Garamond',serif; font-size:26px; font-style:italic; font-weight:400; color:var(--text); display:flex; align-items:baseline; gap:10px; }
+  .star { color:var(--accent); font-size:14px; }
+  #syncStatus { font-size:11px; color:var(--accent); letter-spacing:0.05em; }
+  .app-sub { font-size:11px; color:var(--muted); letter-spacing:0.06em; margin-bottom:2rem; }
+  .controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:1.75rem; }
+  .btn { background:transparent; border:0.5px solid var(--border2); color:var(--muted); font-family:'DM Sans',sans-serif; font-size:12px; padding:6px 16px; border-radius:20px; cursor:pointer; transition:all 0.15s; white-space:nowrap; }
+  .btn:hover { background:var(--surface2); color:var(--text); border-color:var(--accent2); }
+  .btn-accent { background:var(--accent); color:#f5f0e8; border-color:var(--accent); font-weight:500; }
+  .btn-accent:hover { background:var(--accent2); border-color:var(--accent2); color:#f5f0e8; }
+  .btn-outline-accent { background:var(--surface2); color:var(--accent); border-color:var(--accent); }
+  .btn-outline-accent:hover { background:var(--accent); color:#f5f0e8; }
+  .month-nav { display:flex; align-items:center; gap:6px; background:var(--surface); border:0.5px solid var(--border); border-radius:20px; padding:4px 8px; }
+  .month-arrow { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:14px; padding:2px 6px; border-radius:12px; transition:all 0.15s; line-height:1; }
+  .month-arrow:hover { background:var(--surface2); color:var(--text); }
+  .month-label { font-size:12px; color:var(--text); min-width:88px; text-align:center; letter-spacing:0.04em; }
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  table { border-collapse:collapse; min-width:100%; }
+  thead tr.group-row th { font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:var(--accent); font-weight:700; text-align:center; padding:0 4px 4px; border-bottom:none; white-space:nowrap; }
+  thead tr.group-row th.th-project { text-align:left; color:var(--muted); font-weight:600; }
+  thead tr.group-row th.th-total   { text-align:right; color:var(--muted); font-weight:600; }
+  thead tr.week-row th { font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:var(--text); font-weight:700; text-align:right; padding:0 8px 10px; border-bottom:1px solid var(--border2); white-space:nowrap; }
+  thead tr.week-row th:first-child { text-align:left; padding-left:0; }
+  thead th.editable-hdr { cursor:pointer; }
+  thead th.editable-hdr:hover { color:var(--accent); }
+  .wk-del-th { padding:0 4px 10px !important; border-bottom:1px solid var(--border2); vertical-align:bottom; }
+  .wk-del-btn { background:transparent; border:none; color:var(--dim); font-size:14px; cursor:pointer; line-height:1; padding:0 2px; transition:color 0.15s; }
+  .wk-del-btn:hover { color:var(--red-tx); }
+  .act-col { display:none; }
+  .act-col.vis { display:table-cell; }
+  tbody tr { border-bottom:0.5px solid var(--border); transition:background 0.1s; }
+  tbody tr:hover { background:var(--surface); }
+  tbody td { padding:8px 8px; vertical-align:middle; }
+  tbody td:first-child { padding-left:0; }
+  input[type="number"],.proj-input { background:transparent; border:none; border-bottom:0.5px solid transparent; color:var(--text); font-family:'DM Sans',sans-serif; font-size:13px; outline:none; transition:border-color 0.15s; }
+  input[type="number"] { text-align:right; width:72px; }
+  input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance:none; }
+  input:hover { border-bottom-color:var(--border2); }
+  input:focus { border-bottom-color:var(--accent); }
+  .proj-input { width:150px; }
+  .cell-r { text-align:right; }
+  .tot-val { font-weight:500; color:var(--accent); text-align:right; font-size:13px; }
+  .var-pill { display:inline-block; font-size:11px; font-weight:500; padding:2px 8px; border-radius:10px; white-space:nowrap; }
+  .var-good { background:var(--green-bg); color:var(--green-tx); }
+  .var-bad  { background:var(--red-bg);   color:var(--red-tx); }
+  .var-nil  { color:var(--dim); font-size:12px; }
+  tfoot td { padding:11px 8px 4px; border-top:0.5px solid var(--border2); font-size:11px; letter-spacing:0.05em; text-transform:uppercase; color:var(--muted); text-align:right; }
+  tfoot td:first-child { text-align:left; padding-left:0; }
+  tfoot .tot-val { color:var(--accent); font-size:13px; }
+  .del-btn { background:transparent; border:none; color:var(--dim); font-size:18px; cursor:pointer; padding:0 4px; line-height:1; transition:color 0.15s; }
+  .del-btn:hover { color:var(--red-tx); }
+  .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.25); align-items:center; justify-content:center; z-index:100; }
+  .modal-backdrop.open { display:flex; }
+  .modal { background:var(--bg); border:0.5px solid var(--border2); border-radius:var(--radius); padding:1.5rem; width:340px; max-height:80vh; overflow-y:auto; }
+  .modal h3 { font-family:'EB Garamond',serif; font-style:italic; font-size:18px; font-weight:400; margin-bottom:1rem; color:var(--text); }
+  .modal label { display:block; font-size:11px; color:var(--muted); letter-spacing:0.06em; margin-bottom:4px; }
+  .modal-input { background:var(--surface); border:0.5px solid var(--border2); border-radius:6px; padding:7px 10px; width:100%; margin-bottom:10px; font-size:13px; color:var(--text); font-family:'DM Sans',sans-serif; outline:none; }
+  .modal-input:focus { border-color:var(--accent); }
+  .modal-actions { display:flex; gap:8px; margin-top:4px; justify-content:flex-end; }
+  .modal-row { display:flex; gap:8px; align-items:center; margin-bottom:10px; }
+  .modal-row .modal-input { margin-bottom:0; flex:1; }
+  .toast { position:fixed; bottom:2rem; right:2rem; background:var(--text); color:var(--bg); font-size:12px; padding:8px 16px; border-radius:20px; opacity:0; transition:opacity 0.3s; pointer-events:none; z-index:200; }
+  .toast.show { opacity:1; }
+  .footer { font-size:11px; color:var(--dim); font-style:italic; margin-top:1.5rem; }
 
-  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 1.75rem; }
-  .btn {
-    background: transparent; border: 0.5px solid var(--border2);
-    color: var(--muted); font-family: 'DM Sans', sans-serif;
-    font-size: 12px; padding: 6px 16px; border-radius: 20px;
-    cursor: pointer; transition: all 0.15s; white-space: nowrap;
-  }
-  .btn:hover { background: var(--surface2); color: var(--text); border-color: var(--accent2); }
-  .btn-accent { background: var(--accent); color: #f5f0e8; border-color: var(--accent); font-weight: 500; }
-  .btn-accent:hover { background: var(--accent2); border-color: var(--accent2); color: #f5f0e8; }
-
-  .month-nav {
-    display: flex; align-items: center; gap: 6px;
-    background: var(--surface); border: 0.5px solid var(--border);
-    border-radius: 20px; padding: 4px 8px;
-  }
-  .month-arrow {
-    background: transparent; border: none; color: var(--muted);
-    cursor: pointer; font-size: 14px; padding: 2px 6px;
-    border-radius: 12px; transition: all 0.15s; line-height: 1;
-  }
-  .month-arrow:hover { background: var(--surface2); color: var(--text); }
-  .month-label { font-size: 12px; color: var(--text); min-width: 88px; text-align: center; letter-spacing: 0.04em; }
-
-  .table-wrap { overflow-x: auto; }
-  table { border-collapse: collapse; min-width: 100%; }
-
-  /* group row — week labels */
-  thead tr.group-row th {
-    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
-    color: var(--accent); font-weight: 700; text-align: center;
-    padding: 0 4px 4px; border-bottom: none; white-space: nowrap;
-  }
-  thead tr.group-row th.th-project { text-align: left; color: var(--muted); font-weight: 600; }
-  thead tr.group-row th.th-total   { text-align: right; color: var(--muted); font-weight: 600; }
-  thead tr.group-row th.th-del     { width: 28px; }
-
-  /* sub-header row — Plan / Actual / Var */
-  thead tr.week-row th {
-    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
-    color: var(--text); font-weight: 700; text-align: right;
-    padding: 0 8px 10px; border-bottom: 1px solid var(--border2); white-space: nowrap;
-  }
-  thead tr.week-row th:first-child { text-align: left; padding-left: 0; }
-  thead th.editable-hdr { cursor: pointer; }
-  thead th.editable-hdr:hover { color: var(--accent); }
-
-  /* week delete button in header */
-  .wk-del-th {
-    padding: 0 4px 10px !important; border-bottom: 1px solid var(--border2);
-    vertical-align: bottom;
-  }
-  .wk-del-btn {
-    background: transparent; border: none; color: var(--dim);
-    font-size: 14px; cursor: pointer; line-height: 1;
-    padding: 0 2px; transition: color 0.15s;
-  }
-  .wk-del-btn:hover { color: var(--red-tx); }
-
-  .act-col { display: none; }
-  .act-col.vis { display: table-cell; }
-
-  tbody tr { border-bottom: 0.5px solid var(--border); transition: background 0.1s; }
-  tbody tr:hover { background: var(--surface); }
-  tbody td { padding: 8px 8px; vertical-align: middle; }
-  tbody td:first-child { padding-left: 0; }
-
-  input[type="number"], .proj-input {
-    background: transparent; border: none;
-    border-bottom: 0.5px solid transparent;
-    color: var(--text); font-family: 'DM Sans', sans-serif;
-    font-size: 13px; outline: none; transition: border-color 0.15s;
-  }
-  input[type="number"] { text-align: right; width: 72px; }
-  input[type="number"]::-webkit-inner-spin-button,
-  input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
-  input:hover  { border-bottom-color: var(--border2); }
-  input:focus  { border-bottom-color: var(--accent); }
-  .proj-input  { width: 150px; }
-
-  .cell-r { text-align: right; }
-  .tot-val { font-weight: 500; color: var(--accent); text-align: right; font-size: 13px; }
-
-  .var-pill {
-    display: inline-block; font-size: 11px; font-weight: 500;
-    padding: 2px 8px; border-radius: 10px; white-space: nowrap;
-  }
-  .var-good { background: var(--green-bg); color: var(--green-tx); }
-  .var-bad  { background: var(--red-bg);   color: var(--red-tx); }
-  .var-nil  { color: var(--dim); font-size: 12px; }
-
-  tfoot td {
-    padding: 11px 8px 4px; border-top: 0.5px solid var(--border2);
-    font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
-    color: var(--muted); text-align: right;
-  }
-  tfoot td:first-child { text-align: left; padding-left: 0; }
-  tfoot .tot-val { color: var(--accent); font-size: 13px; }
-
-  .del-btn {
-    background: transparent; border: none; color: var(--dim);
-    font-size: 18px; cursor: pointer; padding: 0 4px;
-    line-height: 1; transition: color 0.15s;
-  }
-  .del-btn:hover { color: var(--red-tx); }
-
-  .modal-backdrop {
-    display: none; position: fixed; inset: 0;
-    background: rgba(0,0,0,0.25); align-items: center;
-    justify-content: center; z-index: 100;
-  }
-  .modal-backdrop.open { display: flex; }
-  .modal {
-    background: var(--bg); border: 0.5px solid var(--border2);
-    border-radius: var(--radius); padding: 1.5rem; width: 340px;
-    max-height: 80vh; overflow-y: auto;
-  }
-  .modal h3 {
-    font-family: 'EB Garamond', serif; font-style: italic;
-    font-size: 18px; font-weight: 400; margin-bottom: 1rem; color: var(--text);
-  }
-  .modal label { display: block; font-size: 11px; color: var(--muted); letter-spacing: 0.06em; margin-bottom: 4px; }
-  .modal-input {
-    background: var(--surface); border: 0.5px solid var(--border2);
-    border-radius: 6px; padding: 7px 10px; width: 100%;
-    margin-bottom: 10px; font-size: 13px; color: var(--text);
-    font-family: 'DM Sans', sans-serif; outline: none;
-  }
-  .modal-input:focus { border-color: var(--accent); }
-  .modal-actions { display: flex; gap: 8px; margin-top: 4px; justify-content: flex-end; }
-  .modal-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
-  .modal-row .modal-input { margin-bottom: 0; flex: 1; }
-
-  .toast {
-    position: fixed; bottom: 2rem; right: 2rem;
-    background: var(--text); color: var(--bg);
-    font-size: 12px; padding: 8px 16px; border-radius: 20px;
-    opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 200;
-  }
-  .toast.show { opacity: 1; }
-  .footer { font-size: 11px; color: var(--dim); font-style: italic; margin-top: 1.5rem; }
-
-  @media(max-width:600px){
-    body { padding: 1.5rem 1rem 3rem; }
-    input[type="number"] { width: 55px; }
-    .proj-input { width: 90px; }
+  @media(max-width:768px){
+    body { padding:1.25rem 1rem 3rem; }
+    input[type="number"] { width:55px; }
+    .proj-input { width:90px; }
+    tbody td:first-child, thead tr.group-row th:first-child, thead tr.week-row th:first-child, tfoot td:first-child {
+      position:sticky; left:0; background:var(--bg); z-index:2; box-shadow:2px 0 6px rgba(0,0,0,0.06);
+    }
+    tbody tr:hover td:first-child { background:var(--surface); }
+    tbody td { padding:11px 8px; }
   }
 </style>
 </head>
 <body>
 
-<div class="app-title"><span class="star">✦</span> Collections Tracker</div>
-<p class="app-sub">weekly collections tracker · actuals alongside plan</p>
+<div class="app-header">
+  <div class="app-title"><span class="star">✦</span> Collections Tracker</div>
+  <span id="syncStatus" style="font-size:11px;color:var(--muted);">↻ connecting…</span>
+</div>
+<p class="app-sub">weekly collections tracker · synced across devices</p>
 
 <div class="controls">
   <div class="month-nav">
@@ -198,7 +434,7 @@
     <button class="month-arrow" id="nextMonth">&#8594;</button>
   </div>
   <button class="btn btn-accent" onclick="addRow()">+ add project</button>
-  <button class="btn btn-accent" style="background:var(--surface2);color:var(--accent);border-color:var(--accent);" onclick="addWeek()">+ add week</button>
+  <button class="btn btn-outline-accent" onclick="addWeek()">+ add week</button>
   <button class="btn" id="toggleBtn" onclick="toggleActuals()">show actuals & variance</button>
   <button class="btn" onclick="openRenameModal()">rename weeks</button>
   <button class="btn" onclick="exportCSV()">export CSV</button>
@@ -215,13 +451,13 @@
 </table>
 </div>
 
-<div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap;">
+<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;">
   <button class="btn" style="font-size:11px;" onclick="addRow()">+ add row</button>
   <button class="btn" style="font-size:11px;" onclick="addWeek()">+ add week</button>
 </div>
-<p class="footer">click any cell to edit · week labels editable via "rename weeks" · data auto-saved per month</p>
+<p class="footer" id="footerHint">click any cell to edit · data synced live across all devices via Firebase</p>
 
-<!-- Rename weeks modal -->
+<!-- Rename modal -->
 <div class="modal-backdrop" id="renameModal">
   <div class="modal">
     <h3>Rename weeks</h3>
@@ -234,323 +470,5 @@
 </div>
 
 <div class="toast" id="toast"></div>
-
-<script>
-const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-let currentKey = toKey(new Date());
-let showActuals = false;
-
-function toKey(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
-function keyLabel(k){ const [y,m]=k.split('-'); return MONTHS[+m-1]+' '+y; }
-
-function defaultData(){
-  return {
-    weeks: ['W1','W2','W3','W4'],
-    rows:  [
-      {name:'Project 1', budget:[null,null,null,null], actuals:[null,null,null,null]},
-      {name:'Project 2', budget:[null,null,null,null], actuals:[null,null,null,null]},
-    ]
-  };
-}
-function load(k){ const r=localStorage.getItem('ct3_'+k); return r?JSON.parse(r):defaultData(); }
-function save(k,d){ localStorage.setItem('ct3_'+k, JSON.stringify(d)); }
-
-let data = load(currentKey);
-
-// ── Month nav ──
-document.getElementById('prevMonth').onclick = ()=>shiftMonth(-1);
-document.getElementById('nextMonth').onclick = ()=>shiftMonth(1);
-function shiftMonth(d){
-  const [y,m]=currentKey.split('-').map(Number);
-  const nd=new Date(y,m-1+d,1);
-  currentKey=toKey(nd); data=load(currentKey);
-  document.getElementById('monthLabel').textContent=keyLabel(currentKey);
-  renderAll();
-}
-
-// ── Add / remove weeks ──
-function addWeek(){
-  const n = data.weeks.length + 1;
-  data.weeks.push('W'+n);
-  data.rows.forEach(r=>{ r.budget.push(null); r.actuals.push(null); });
-  persist(); renderAll(); toast('Week added');
-}
-function deleteWeek(wi){
-  if(data.weeks.length <= 1){ toast('Need at least 1 week'); return; }
-  data.weeks.splice(wi,1);
-  data.rows.forEach(r=>{ r.budget.splice(wi,1); r.actuals.splice(wi,1); });
-  persist(); renderAll(); toast('Week removed');
-}
-
-// ── Add / remove rows ──
-function addRow(){
-  const blank = Array(data.weeks.length).fill(null);
-  data.rows.push({name:'New project', budget:[...blank], actuals:[...blank]});
-  persist(); renderAll();
-}
-function deleteRow(ri){
-  data.rows.splice(ri,1); persist(); renderAll();
-}
-
-// ── Render everything ──
-function renderAll(){
-  document.getElementById('monthLabel').textContent = keyLabel(currentKey);
-  buildGroupRow();
-  buildWeekRow();
-  buildTfoot();
-  renderRows();
-  recalc();
-  applyVis();
-}
-
-function buildGroupRow(){
-  const gr = document.getElementById('groupRow');
-  gr.innerHTML = '';
-
-  // "Total for Month" first column
-  const thProj = document.createElement('th');
-  thProj.className = 'th-project';
-  thProj.textContent = 'Total for Month';
-  gr.appendChild(thProj);
-
-  // one th per week spanning 3 cols (plan+act+var) or 1 col when hidden
-  data.weeks.forEach((wk, wi)=>{
-    const th = document.createElement('th');
-    th.id = 'gth'+wi;
-    th.colSpan = showActuals ? 3 : 1;
-    th.textContent = wk;
-    gr.appendChild(th);
-    // week delete th (shown inline after each week group)
-    const thd = document.createElement('th');
-    thd.className = 'th-del';
-    thd.id = 'gwdel'+wi;
-    // hidden — shown in week-row instead
-    gr.appendChild(thd);
-  });
-
-  // total col
-  const thTot = document.createElement('th');
-  thTot.className = 'th-total'; thTot.textContent = 'Total';
-  gr.appendChild(thTot);
-
-  // row-del col
-  gr.appendChild(document.createElement('th'));
-}
-
-function buildWeekRow(){
-  const wr = document.getElementById('weekRow');
-  wr.innerHTML = '';
-
-  // first col label (empty under "Total for Month")
-  const thFirst = document.createElement('th');
-  thFirst.style.textAlign = 'left';
-  thFirst.style.paddingLeft = '0';
-  wr.appendChild(thFirst);
-
-  data.weeks.forEach((wk, wi)=>{
-    // Plan
-    const thP = document.createElement('th');
-    thP.className = 'cell-r editable-hdr';
-    thP.textContent = 'Plan';
-    thP.onclick = openRenameModal;
-    wr.appendChild(thP);
-
-    // Actual
-    const thA = document.createElement('th');
-    thA.className = 'cell-r act-col'+(showActuals?' vis':'');
-    thA.textContent = 'Actual';
-    wr.appendChild(thA);
-
-    // Var
-    const thV = document.createElement('th');
-    thV.className = 'cell-r act-col'+(showActuals?' vis':'');
-    thV.textContent = 'Var';
-    wr.appendChild(thV);
-
-    // week delete button
-    const thD = document.createElement('th');
-    thD.className = 'wk-del-th';
-    thD.innerHTML = `<button class="wk-del-btn" onclick="deleteWeek(${wi})" title="remove week">−</button>`;
-    wr.appendChild(thD);
-  });
-
-  // Total header
-  const thTot = document.createElement('th');
-  thTot.className = 'cell-r'; thTot.textContent = '';
-  wr.appendChild(thTot);
-
-  // row-del col
-  const thDel = document.createElement('th');
-  thDel.style.width = '28px';
-  wr.appendChild(thDel);
-}
-
-function buildTfoot(){
-  const row = document.getElementById('tfootRow');
-  row.innerHTML = '';
-
-  const tdL = document.createElement('td');
-  tdL.textContent = 'Total'; tdL.style.textAlign = 'left'; tdL.style.paddingLeft = '0';
-  row.appendChild(tdL);
-
-  data.weeks.forEach((_,wi)=>{
-    const tp = document.createElement('td');
-    tp.className = 'tot-val'; tp.id = 'totB'+wi;
-    row.appendChild(tp);
-    const ta = document.createElement('td');
-    ta.className = 'tot-val act-col'+(showActuals?' vis':''); ta.id = 'totA'+wi;
-    row.appendChild(ta);
-    const tv = document.createElement('td');
-    tv.className = 'act-col'+(showActuals?' vis':''); tv.id = 'totV'+wi;
-    row.appendChild(tv);
-    // spacer for week-del column
-    const ts = document.createElement('td');
-    row.appendChild(ts);
-  });
-
-  const tAll = document.createElement('td');
-  tAll.className = 'tot-val'; tAll.id = 'totAll';
-  row.appendChild(tAll);
-
-  row.appendChild(document.createElement('td'));
-}
-
-function renderRows(){
-  const tbody = document.getElementById('tbody');
-  tbody.innerHTML = '';
-  data.rows.forEach((row, ri)=>{
-    const tr = document.createElement('tr');
-    let html = `<td><input class="proj-input" type="text" value="${esc(row.name)}" placeholder="project name"
-      oninput="data.rows[${ri}].name=this.value;persist()"/></td>`;
-
-    data.weeks.forEach((_,wi)=>{
-      const bv = row.budget[wi]??'';
-      const av = row.actuals[wi]??'';
-      html += `<td class="cell-r"><input type="number" value="${bv}" placeholder="—"
-        oninput="data.rows[${ri}].budget[${wi}]=this.value===''?null:+this.value;recalc();persist()"/></td>`;
-      html += `<td class="cell-r act-col${showActuals?' vis':''}">
-        <input type="number" value="${av}" placeholder="—"
-        oninput="data.rows[${ri}].actuals[${wi}]=this.value===''?null:+this.value;recalc();persist()"/></td>`;
-      html += `<td class="cell-r act-col${showActuals?' vis':''}" id="vp${ri}_${wi}">${varPill(row.budget[wi], row.actuals[wi])}</td>`;
-      // spacer for week-del col
-      html += `<td></td>`;
-    });
-
-    const rowTot = (row.budget||[]).reduce((s,v)=>s+(v||0),0);
-    html += `<td class="tot-val" id="rtot${ri}">${rowTot>0?fmt(rowTot):'—'}</td>`;
-    html += `<td><button class="del-btn" onclick="deleteRow(${ri})" title="remove">×</button></td>`;
-    tr.innerHTML = html;
-    tbody.appendChild(tr);
-  });
-}
-
-function varPill(b, a){
-  const hasData = b!==null || a!==null;
-  if(!hasData) return `<span class="var-nil">—</span>`;
-  const diff = (a||0)-(b||0);
-  const cls = diff>0?'var-good':diff<0?'var-bad':'';
-  const sign = diff>0?'+':'';
-  return cls
-    ? `<span class="var-pill ${cls}">${sign}${Number(diff).toLocaleString('en-IN')}</span>`
-    : `<span class="var-nil">—</span>`;
-}
-
-function fmt(n){
-  if(n===null||n===undefined||isNaN(n)) return '—';
-  return Number(n).toLocaleString('en-IN');
-}
-
-function recalc(){
-  let grandB=0;
-  data.weeks.forEach((_,wi)=>{
-    let sumB=0, sumA=0;
-    data.rows.forEach((row,ri)=>{
-      sumB += row.budget[wi]||0;
-      sumA += row.actuals[wi]||0;
-      const cell = document.getElementById('vp'+ri+'_'+wi);
-      if(cell) cell.innerHTML = varPill(row.budget[wi], row.actuals[wi]);
-      const rt = document.getElementById('rtot'+ri);
-      if(rt){ const t=(row.budget||[]).reduce((s,v)=>s+(v||0),0); rt.textContent=t>0?fmt(t):'—'; }
-    });
-    const bEl=document.getElementById('totB'+wi);
-    const aEl=document.getElementById('totA'+wi);
-    const vEl=document.getElementById('totV'+wi);
-    if(bEl) bEl.textContent = sumB>0?fmt(sumB):'—';
-    if(aEl) aEl.textContent = sumA>0?fmt(sumA):'—';
-    if(vEl) vEl.innerHTML = (sumB>0||sumA>0) ? varPill(sumB, sumA) : '';
-    grandB += sumB;
-  });
-  const allEl = document.getElementById('totAll');
-  if(allEl) allEl.textContent = grandB>0?fmt(grandB):'—';
-}
-
-function applyVis(){
-  document.querySelectorAll('.act-col').forEach(el=>el.classList.toggle('vis',showActuals));
-  data.weeks.forEach((_,wi)=>{
-    const g=document.getElementById('gth'+wi);
-    if(g) g.colSpan = showActuals?3:1;
-  });
-}
-
-function toggleActuals(){
-  showActuals=!showActuals;
-  document.getElementById('toggleBtn').textContent = showActuals?'hide actuals & variance':'show actuals & variance';
-  applyVis();
-}
-
-// ── Rename modal ──
-function openRenameModal(){
-  const wrap = document.getElementById('renameInputs');
-  wrap.innerHTML = '';
-  data.weeks.forEach((wk,i)=>{
-    wrap.innerHTML += `<label>Week ${i+1}</label>
-      <div class="modal-row">
-        <input class="modal-input" id="wki${i}" value="${esc(wk)}" placeholder="W${i+1}"/>
-      </div>`;
-  });
-  document.getElementById('renameModal').classList.add('open');
-}
-function closeRenameModal(){ document.getElementById('renameModal').classList.remove('open'); }
-function saveRenames(){
-  data.weeks = data.weeks.map((_,i)=>{
-    const v = document.getElementById('wki'+i);
-    return v ? v.value.trim()||'W'+(i+1) : 'W'+(i+1);
-  });
-  persist(); closeRenameModal(); renderAll(); toast('Weeks renamed');
-}
-
-// ── Export CSV ──
-function exportCSV(){
-  let csv = 'Project';
-  data.weeks.forEach(w=>{ csv+=`,Plan ${w},Actual ${w},Variance ${w}`; });
-  csv += ',Total\n';
-  data.rows.forEach(row=>{
-    csv += `"${row.name}"`;
-    data.weeks.forEach((_,i)=>{
-      const b=row.budget[i]??'', a=row.actuals[i]??'';
-      const diff=(row.actuals[i]||0)-(row.budget[i]||0);
-      csv += `,${b},${a},${(b!==''||a!=='')?diff:''}`;
-    });
-    csv += ','+(row.budget.reduce((s,v)=>s+(v||0),0)||'')+'\n';
-  });
-  const blob=new Blob([csv],{type:'text/csv'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a'); a.href=url;
-  a.download=`collections_${currentKey}.csv`; a.click();
-  URL.revokeObjectURL(url); toast('CSV exported');
-}
-
-function persist(){ save(currentKey,data); }
-
-function toast(msg){
-  const el=document.getElementById('toast');
-  el.textContent=msg; el.classList.add('show');
-  setTimeout(()=>el.classList.remove('show'),2200);
-}
-
-function esc(s){ return (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
-
-renderAll();
-</script>
 </body>
 </html>
