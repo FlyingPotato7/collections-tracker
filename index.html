@@ -129,7 +129,6 @@ function renderAll(){
   recalc();
   applyVis();
   if(window.innerWidth <= 768){
-    document.querySelectorAll('input').forEach(inp=>inp.setAttribute('readonly',true));
     const hint = document.getElementById('footerHint');
     if(hint) hint.textContent='scroll sideways to see all weeks · synced across devices';
   }
